@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Build artifacts
+build/
+dist/
+*.log
+*.tmp
+
+# Temp Dirs
+.diagnostics/
+
+# SwiftPM / Xcode
+.build/
+patcher-app/.build/
+patcher-app/build/
+patcher-app/.swiftpm/
+finewine-app/.build/
+finewine-app/build/
+finewine-app/.swiftpm/

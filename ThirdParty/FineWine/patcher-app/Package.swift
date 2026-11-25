@@ -1,0 +1,23 @@
+// swift-tools-version:5.9
+// FineWine Patcher — built with SwiftPM + scripts/build-app.sh (no Xcode required).
+import PackageDescription
+
+let package = Package(
+    name: "FineWinePatcher",
+    defaultLocalization: "en",
+    platforms: [.macOS("15.0")],
+    targets: [
+        .executableTarget(
+            name: "FineWinePatcher",
+            path: "Sources/FineWinePatcher",
+            resources: [
+                .process("Resources")
+            ]
+        ),
+        .testTarget(
+            name: "FineWinePatcherTests",
+            dependencies: ["FineWinePatcher"],
+            path: "Tests/FineWinePatcherTests"
+        )
+    ]
+)

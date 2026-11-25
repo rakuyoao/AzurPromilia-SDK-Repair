@@ -1,0 +1,12 @@
+{
+  "finewine": {
+    "version": "3.1.2",
+    "commit": "fbac1a88e7dc1c1c40881a6b5a367387780a2361",
+    "url": "https://github.com/stoicswe/Endfield_FineWine/releases/download/3.1.2/endfield-wine-modules.tar.gz",
+    "sha256": "80fbdaa93f73cbe132a863d374e9f335d6338a8b1d67060fb65784bfc42ea544"
+  },
+  "sdk": {
+    "union_pcsdk.dll": "939448f9a0a7a47e6f645d20497a454b43000982406a058965652b53a86fc697",
+    "manjuu_sdk_browser.exe": "7eaed6b9f620f57a613a81db499eac5ec3005d470b19be5fb9bee29be3aced44"
+  }
+}

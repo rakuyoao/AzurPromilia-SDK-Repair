@@ -1,0 +1,201 @@
+# Contributing
+
+First off, thank you so much for considering a contribution to this project. We welcome contributions from everyone!
+
+<br/>
+
+## Table of Contents
+
+-   [1. How can I contribute?](#1-how-can-i-contribute)
+-   [2. Guidelines](#2-guidelines)
+    -   [2.1 Git commit messages](#21-git-commit-messages)
+    -   [2.2 Coding style guide](#22-coding-style-guide)
+-   [3. Code Review Process](#3-code-review-process)
+-   [4. Community and Communication](#4-community-and-communication)
+-   [5. Releasing](#releasing)
+
+<br/>
+
+[//]: # '## 1. How can I contribute?'
+
+## How to Contribute?
+
+Contributing is simple. Here's how you can do it:
+
+1. **Identify an Issue**: Look for existing [Issues](https://github.com/stoicswe/Endfield_FineWine/issues) or create your own explaining the feature or fix.
+2. **Fork the Repository**: Click on the fork button in the top right corner.
+3. **Clone the Repository**: After forking, clone the repo to your local machine to make changes.
+4. **Set up Your Environment**: Set up the repository by following the Quick Start section of the [README.md](README.md).
+5. **Create a New Branch**: Before making any changes, switch to a new branch:
+    ```bash
+    # For bugs:
+    git checkout -b bug/your-new-branch-name
+    
+    # For features:
+    git checkout -b feature/your-new-branch-name
+    ```
+6. **Make Changes**: Implement your feature or fix.
+7. **Run Tests**: Ensure your changes do not break any existing functionality.
+8. **Write Commit Messages**: Please try to make your commit messages adequately descriptive.
+9. **Push to GitHub**: After committing your changes, push them to GitHub:
+    ```
+    git push origin your-new-branch-name
+    ```
+10. **Submit a Pull Request**: Go to your repository on GitHub and click the 'Compare & pull request' button. Fill in the details and submit.
+
+<br/>
+
+[//]: # '## 2. Guidelines'
+
+## Guidelines
+
+[//]: # '### 2.1 Git commit messages'
+
+### Commit Messages
+
+While we do not have a distinct commit message style, it is best to ensure that your commit message contains enough description as to what the goal of the commit is.
+
+[//]: # '### 2.2 Coding style guide'
+
+### Coding Style Guide
+
+We follow the standard practice for C++ coding styles.
+
+```cpp
+namespace MyNameSpace {
+  class MyClass {
+  
+  public:
+    void myFunction() {
+      // Do something
+    }
+  }
+}
+```
+
+<br/>
+
+[//]: # '## 3. Code Review Process'
+
+### Code Review
+
+All submissions, including submissions by project maintainers, require review. We use GitHub pull requests for this process. If your pull request is particularly urgent, please mention this in the request.
+
+<br/>
+
+[//]: # '## 4. Community and Communication'
+
+### Community and Communication
+
+Follow discussions in the [GitHub Issues](https://github.com/{username}/{repo}/issues) section of our repository.
+
+<br/>
+
+[//]: # '## 5. Releasing'
+
+## Releasing
+
+Full releases are cut from a `release/<version>` branch. Pushing to one (for example
+`release/1.0.1`) runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which
+builds the complete artifact set (patched Wine + MoltenVK + `FineWine Patcher.app`) and publishes
+a full GitHub Release:
+
+-   **Tag:** `<version>` (bare, matching the existing `1.0.0` tag — no `v` prefix).
+-   **Title:** `Endfield FineWine <version>`.
+-   **Assets:** `FineWine.Patcher.app.zip`, `endfield-wine-modules.tar.gz` (Wine + MoltenVK, for
+    `scripts/apply-modules.sh`), and `SHA256SUMS.txt`.
+-   **Notes:** a human-readable summary of the commits since the previous release, generated with
+    the same OpenRouter/LLM backend as the wiki (`OPENROUTER_API_KEY` secret; model from
+    `.git-wiki-builder.yml`). If the model is unavailable it falls back to the raw commit list, so a
+    flaky free-tier model never blocks a release.
+
+The `.app`'s `CFBundleShortVersionString` is set from the branch version, so it reports the version
+it was released as.
+
+To cut a release:
+
+```bash
+git checkout main && git pull
+git checkout -b release/1.0.1
+git push origin release/1.0.1      # triggers the release workflow
+```
+
+Then watch the run under **Actions → release**; the published release appears at
+`https://github.com/stoicswe/Endfield_FineWine/releases/tag/1.0.1`.
+
+Notes:
+
+-   The version must be `x.y.z`. The previous release is detected from the numeric git tags, so
+    always tag releases as bare versions (`1.0.1`, not `v1.0.1`).
+-   Re-pushing to the same `release/<version>` branch refreshes the existing release in place.
+-   To publish an explicit version without a branch, use **Actions → release → Run workflow** with
+    the `version` input.
+-   Nightly snapshots are separate: every nightly run publishes a new prerelease whose tag
+    mirrors its title, `nightly_<CrossOver version>.<UTC date>_<commit>`, so each snapshot
+    keeps its own assets; see
+    [`.github/workflows/nightly.yml`](.github/workflows/nightly.yml).
+-   Betas are separate again: a push to a `beta/<anything>` branch (or **Actions → beta → Run
+    workflow** on one) builds that branch the way a nightly builds `main`, builds FineWine.app
+    with its Wine runtime inside as well (from source, which takes hours;
+    [`.github/workflows/build-finewine-full.yml`](.github/workflows/build-finewine-full.yml),
+    which can also be run by hand without publishing anything), and publishes a
+    prerelease titled `Endfield FW <UTC date as YYYYMMDD> Beta <number>`, tagged
+    `beta_<YYYYMMDD>.<number>`. The number counts betas across all beta branches and carries on
+    from the highest one there is; a commit that already has a beta is not built again. Betas
+    never count as a nightly's baseline, are never the latest release, and are not announced;
+    see [`.github/workflows/beta.yml`](.github/workflows/beta.yml).
+
+### Discord announcements (optional)
+
+A newly created full release can be announced in Discord, pinging a role. The job is skipped
+when neither transport below is configured, so this stays opt-in.
+
+-   **Discord app (preferred):** create an application in the
+    [Developer Portal](https://discord.com/developers/applications), add a bot, and invite it to
+    your server with **View Channel**, **Send Messages**, **Embed Links**, and **Mention
+    @everyone, @here, and All Roles**. Then set:
+    -   `DISCORD_BOT_TOKEN` — repository secret (Bot tab → Reset Token)
+    -   `DISCORD_CHANNEL_ID` — repository variable (right-click channel with Developer Mode on
+        → Copy Channel ID)
+    If the channel is an Announcement channel, the message is also crossposted to every channel
+    following it.
+-   **Webhook (simpler):** set `DISCORD_WEBHOOK_URL` (channel settings → Integrations →
+    Webhooks). Webhooks cannot crosspost announcement channels, and can only ping a role that
+    has "Allow anyone to @mention this role" enabled.
+-   **Ping target:** set `DISCORD_RELEASE_ROLE_ID` (repository variable) to the role's ID. With
+    the bot transport, its Mention Everyone permission lets it ping non-mentionable roles.
+    Only that role is mentionable in the message — `@everyone`/`@here` are always suppressed.
+
+The announcement reuses the same generated summary as the release body; refreshing an existing
+release tag does not re-post it.
+
+### Bluesky announcements (optional)
+
+New full releases and new nightly snapshots are posted as a **Bluesky thread** when the bot is
+configured. The first post is always the same template:
+
+```text
+Type: Release            # or Nightly
+Version: 1.2.6
+Build time: 1h 12m 4s    # workflow start -> publish (docs/wiki are separate workflows)
+
+Download: https://github.com/stoicswe/Endfield_FineWine/releases/tag/1.2.6
+```
+
+The replies carry the generated release description (full releases) or the commit list
+(nightlies), split into <=300-character posts.
+
+Add these under **Settings → Secrets and variables → Actions**:
+
+-   `BLUESKY_HANDLE` — **repository variable**: the bot's handle, e.g.
+    `endfield-finewine.bsky.social`.
+-   `BLUESKY_APP_PASSWORD` — **repository secret**: an *app password* from the account's
+    Settings → App Passwords (never the account password).
+-   `BLUESKY_PDS` — *optional* **repository variable**: PDS base URL. Defaults to
+    `https://bsky.social`; only needed for a custom/self-hosted PDS.
+-   `BLUESKY_MAX_POSTS` — *optional* **repository variable**: maximum thread length including
+    the first post (default `20`). Longer descriptions are cut off with a warning in the log.
+
+The step is skipped when the handle or app password is missing, and only newly created
+releases/nightlies post (refreshing an existing tag does not re-post). Posting is best-effort: a
+Bluesky failure warns in the run log and does not fail the release.

@@ -1,0 +1,105 @@
+From: FineWine
+Subject: [PATCH] loader, ntdll, win32u: Let a program run as a game for macOS Game Mode.
+
+macOS turns Game Mode on for a full-screen app that says it is a game. It reads that from the
+Info.plist of the app bundle the running executable is in; the Info.plist Wine embeds in its
+loader is not consulted (LaunchServices registers a bare loader with no bundle identity at
+all), and nothing can be changed once the program is running.
+
+The runtime therefore gets a second copy of the loader inside a small app bundle, "FineWine
+Game.app", whose Info.plist says it is a game (scripts/lib/make-game-loader.sh makes it when
+the runtime is packaged). This patch is what lets that copy work:
+
+- loader: an executable in <dir>/X.app/Contents/MacOS finds ntdll.so in <dir>.
+- ntdll: FINEWINE_LOADER is the path, relative to the loader's directory, of the loader that
+  a program and every process it starts are run with.
+- win32u: creating a Vulkan instance, which Direct3D 12 does too through vkd3d, creates the
+  file named in FINEWINE_GAME_MARKER. That is how FineWine learns that a program renders with
+  a GPU API, including one that only does so through a game its launcher starts; it then runs
+  that program with the game loader. DXMT does the same for Direct3D 10 and 11.
+
+Without those two variables nothing changes. Checked on macOS 27: a full-screen window of a
+program run this way is registered as org.finewine.game and Game Mode turns on.
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 9dfaa6b..9e44f8a 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -402,6 +402,20 @@ static void init_paths(void)
+         bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
+         data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
+         wineloader = build_path( ntdll_dir, "wine" );
++        /* FineWine: macOS turns Game Mode on for an app that says it is a game, and reads
++         * that from the app bundle the running executable is in. The runtime therefore has
++         * a second copy of the loader, inside a small app bundle beside this one.
++         * FINEWINE_LOADER is its path, relative to this directory; a program started with
++         * it, and everything that program starts, runs under that copy. */
++        {
++            const char *name = getenv( "FINEWINE_LOADER" );
++            if (name && *name && name[0] != '/' && !strstr( name, ".." ))
++            {
++                char *alt = build_path( ntdll_dir, name );
++                if (!access( alt, X_OK )) wineloader = alt;
++                else free( alt );
++            }
++        }
+     }
+ 
+     set_dll_path();
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index b94c922..dbb733c 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -33,6 +33,7 @@
+ #include <dlfcn.h>
+ #include <pthread.h>
+ #include <unistd.h>
++#include <fcntl.h>
+ 
+ #include "ntstatus.h"
+ #include "win32u_private.h"
+@@ -596,9 +597,25 @@ failed:
+     return res;
+ }
+ 
++/* FineWine: a program that starts using a rendering API is a game as far as macOS Game Mode is
++ * concerned. FineWine names a file in FINEWINE_GAME_MARKER; creating it is how the runtime
++ * tells FineWine, which then runs the program with the loader that says so (see
++ * FINEWINE_LOADER in ntdll). Vulkan and, through vkd3d, Direct3D 12 come through here. */
++static void finewine_mark_as_game(void)
++{
++    static LONG marked;
++    const char *marker = getenv( "FINEWINE_GAME_MARKER" );
++    int fd;
++
++    if (!marker || !*marker || InterlockedExchange( &marked, 1 )) return;
++    if ((fd = open( marker, O_WRONLY | O_CREAT, 0644 )) >= 0) close( fd );
++}
++
+ static VkResult win32u_vkCreateInstance( const VkInstanceCreateInfo *client_create_info, const VkAllocationCallbacks *allocator,
+                                          VkInstance *client_instance_ptr )
+ {
++    finewine_mark_as_game();
++
+     VkInstanceCreateInfo *create_info = (VkInstanceCreateInfo *)client_create_info; /* cast away const, chain has been copied in the thunks */
+     VkInstance host_instance = VK_NULL_HANDLE, client_instance = *client_instance_ptr;
+     struct vulkan_physical_device *physical_devices;
+diff --git a/loader/main.c b/loader/main.c
+index 71ba308..586da88 100644
+--- a/loader/main.c
++++ b/loader/main.c
+@@ -153,6 +153,14 @@ static void *try_dlopen( const char *argv0 )
+ 
+     if ((p = remove_tail( dir, "/loader" )))
+         path = build_path( p, "dlls/ntdll/ntdll.so" );
++    /* FineWine: the copy of the loader that macOS treats as a game is inside an app bundle
++     * beside the usual loader; ntdll is three directories up from the bundle's executable. */
++    else if ((p = remove_tail( dir, ".app/Contents/MacOS" )))
++    {
++        char *slash = strrchr( p, '/' );
++        if (slash) *slash = 0;
++        path = build_path( p, "ntdll.so" );
++    }
+     else
+         path = build_path( dir, "ntdll.so" );
+ 

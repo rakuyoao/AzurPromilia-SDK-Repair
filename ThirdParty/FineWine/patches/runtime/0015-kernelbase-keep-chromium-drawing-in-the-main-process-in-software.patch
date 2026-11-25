@@ -1,0 +1,119 @@
+kernelbase: keep Chromium-based programs' drawing in their main process, in software
+
+Launchers built on CEF or Electron draw from a GPU process into the main process's window.
+DXMT cannot present into another process's window, and the Mac driver cannot paint one with
+GDI from another process either, so the window stays blank. A process that has Chromium in it
+(libcef.dll loaded; or ffmpeg.dll imported with Chromium's resources beside the program) gets
+--in-process-gpu --disable-gpu --disable-gpu-compositing added to its own command line, unless
+it is one of Chromium's child processes. It is done inside the process: adding the switches
+when a program is started hits every program in the folder (a launcher's 7z.exe failed on
+them). FINEWINE_CHROMIUM_FLAGS names other switches, or "none".
+
+diff --git a/dlls/kernelbase/kernelbase.h b/dlls/kernelbase/kernelbase.h
+index e46ca0f..c501ba5 100644
+--- a/dlls/kernelbase/kernelbase.h
++++ b/dlls/kernelbase/kernelbase.h
+@@ -35,6 +35,7 @@ extern WCHAR *file_name_AtoW( LPCSTR name, BOOL alloc );
+ extern DWORD file_name_WtoA( LPCWSTR src, INT srclen, LPSTR dest, INT destlen );
+ extern void init_global_data(void);
+ extern void init_startup_info( RTL_USER_PROCESS_PARAMETERS *params );
++extern void finewine_check_chromium(void);
+ extern void init_locale( HMODULE module );
+ extern void init_console(void);
+ extern BOOL is_console_handle( HANDLE );
+diff --git a/dlls/kernelbase/loader.c b/dlls/kernelbase/loader.c
+index 6c6f1f3..4956d66 100644
+--- a/dlls/kernelbase/loader.c
++++ b/dlls/kernelbase/loader.c
+@@ -180,6 +180,7 @@ static HMODULE load_library( const UNICODE_STRING *libname, DWORD flags )
+             if (status == STATUS_DLL_NOT_FOUND && (GetVersion() & 0x80000000))
+                 SetLastError( ERROR_DLL_NOT_FOUND );
+         }
++        else finewine_check_chromium();  /* for a program that loads Chromium when it needs it */
+     }
+     return module;
+ }
+diff --git a/dlls/kernelbase/main.c b/dlls/kernelbase/main.c
+index 8c37e5d..ec3187b 100644
+--- a/dlls/kernelbase/main.c
++++ b/dlls/kernelbase/main.c
+@@ -48,6 +48,7 @@ BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
+         init_global_data();
+         init_locale( hinst );
+         init_startup_info( NtCurrentTeb()->Peb->ProcessParameters );
++        finewine_check_chromium();  /* for a program that has Chromium among its imports */
+         init_console();
+     }
+     return TRUE;
+diff --git a/dlls/kernelbase/process.c b/dlls/kernelbase/process.c
+index c58e977..a32198c 100644
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -1329,6 +1329,67 @@ void init_startup_info( RTL_USER_PROCESS_PARAMETERS *params )
+ }
+ 
+ 
++/* FineWine: launchers built on Chromium (CEF, Electron) draw their window from a separate
++ * "GPU process", into a window that belongs to the main process. That cannot work here in
++ * either of Chromium's modes:
++ *   - with Direct3D, DXMT cannot present into another process's window ("cross-process
++ *     swapchain not supported"), nor attach to the child window Chromium makes for it;
++ *   - in software, the GPU process paints the main process's window with GDI, and the Mac
++ *     driver cannot paint a window from a process that does not own it.
++ * The window stays blank. So Chromium is asked for both things that avoid it: to do that work
++ * inside the main process (--in-process-gpu) and to draw in software (--disable-gpu,
++ * --disable-gpu-compositing). A launcher's pages do not need more. The main process passes
++ * what is needed on to the processes it starts.
++ *
++ * The switches are added to this process's own command line, once Chromium is in it: when
++ * libcef.dll has been loaded, or for Electron when the program imports ffmpeg.dll and has
++ * Chromium's resources beside it. Chromium reads the command line when it is initialised,
++ * which is later. Chromium's own child processes (started with --type=) are left alone.
++ * It must be done here and not by whoever starts the program: other programs live in the same
++ * folder (the launcher's 7z.exe, updaters, crash reporters) and choke on the switches.
++ * FINEWINE_CHROMIUM_FLAGS names other switches to add, or "none". */
++void finewine_check_chromium(void)
++{
++    static LONG done;
++    RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
++    WCHAR flags[256], path[MAX_PATH], *end, *line;
++    ANSI_STRING ansi;
++    DWORD len;
++
++    if (done || !command_lineW) return;
++    /* Only a CEF under its own name. Games also embed renamed builds that draw off screen
++     * into the game's own picture (zf_cef.dll in Zenless Zone Zero: its login window, inside
++     * the game process). Those work as they are, and the switches made that login window
++     * disappear, so chrome_elf.dll, which would catch them, is deliberately not looked for. */
++    if (!GetModuleHandleW( L"libcef.dll" ))
++    {
++        if (!GetModuleHandleW( L"ffmpeg.dll" )) return;
++        len = GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
++        if (!len || len + 32 >= ARRAY_SIZE(path) || !(end = wcsrchr( path, '\\' ))) return;
++        wcscpy( end + 1, L"chrome_100_percent.pak" );
++        if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES) return;
++    }
++    if (InterlockedExchange( &done, 1 )) return;
++
++    if (wcsstr( command_lineW, L"--type=" ) || wcsstr( command_lineW, L"--disable-gpu-compositing" )) return;
++    len = GetEnvironmentVariableW( L"FINEWINE_CHROMIUM_FLAGS", flags, ARRAY_SIZE(flags) );
++    if (!len || len >= ARRAY_SIZE(flags)) wcscpy( flags, L"--in-process-gpu --disable-gpu --disable-gpu-compositing" );
++    if (!wcsicmp( flags, L"none" )) return;
++
++    len = wcslen( command_lineW ) + wcslen( flags ) + 2;
++    if (!(line = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) ))) return;
++    swprintf( line, len, L"%s %s", command_lineW, flags );
++    TRACE( "Chromium in this process: command line is now %s\n", debugstr_w(line) );
++
++    /* the old buffers are left alone: something may still be reading them */
++    params->CommandLine.Buffer = line;
++    params->CommandLine.Length = wcslen( line ) * sizeof(WCHAR);
++    params->CommandLine.MaximumLength = len * sizeof(WCHAR);
++    command_lineW = line;
++    if (!RtlUnicodeStringToAnsiString( &ansi, &params->CommandLine, TRUE )) command_lineA = ansi.Buffer;
++}
++
++
+ /**********************************************************************
+  *           BaseFlushAppcompatCache   (kernelbase.@)
+  */

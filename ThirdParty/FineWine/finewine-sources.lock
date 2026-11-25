@@ -1,0 +1,72 @@
+# finewine-sources.lock — exactly what FineWine's runtime and app are built from.
+#
+# Every source the FineWine build downloads is named here by an exact commit (a tag can be
+# moved; a commit cannot), and the one prebuilt download by its checksum. The build scripts
+# read this file (scripts/lib/sources-lock.sh) and stop if what they fetched is not what is
+# named here. To move to a newer version of something, change its line here, build, run
+# scripts/test-finewine-runtime.sh, and commit the change with the patches it needed.
+#
+# Sources reached through these are pinned by them in turn: FEX's and DXMT's submodules by
+# their commits, and MoltenVK's SPIRV-Cross, Vulkan-Headers and other dependencies by the
+# ExternalRevisions files in its commit.
+#
+# For a one-off build of something else, set the variable in the environment (WINE_TAG=…
+# WINE_COMMIT=…) or set FINEWINE_UNLOCKED=1, which turns the checks into warnings.
+#
+# Format: KEY=value, one per line; # starts a comment.
+
+# Wine (scripts/build-finewine-runtime.sh), from gitlab.winehq.org/wine/wine
+WINE_TAG=wine-11.21
+WINE_COMMIT=2528aff26208257fdbf980666a4f0e66d47563ce
+
+# FEX, x64 emulation (scripts/build-fex.sh), from github.com/FEX-Emu/FEX
+FEX_COMMIT=ea43314f040633c76fb5891ff31d8a7c3dc533b8
+
+# llvm-mingw, the Windows compiler for FEX and DXMT (scripts/build-fex.sh toolchain),
+# a release archive from github.com/mstorsjo/llvm-mingw
+MINGW_VERSION=20260908
+MINGW_SHA256=d1dc5d1ecf3a3ced5ed5544c72f1acd0c8e84eb3024d520ecc6b143eec62a149
+
+# DXMT, Direct3D 10/11 on Metal (scripts/build-dxmt.sh), from github.com/3Shain/dxmt
+DXMT_COMMIT=0df86108348bab2aaa5c4610a5eb63a9de9047ac
+
+# LLVM 15, whose libraries DXMT links (scripts/build-dxmt.sh llvm), from github.com/llvm/llvm-project
+DXMT_LLVM_TAG=llvmorg-15.0.7
+DXMT_LLVM_COMMIT=8dfdcc7b7bf66834a761bd8de445840ef68e4d1a
+
+# MoltenVK, FineWine flavour (MVK_FLAVOR=finewine scripts/build-moltenvk.sh), from
+# github.com/KhronosGroup/MoltenVK. (The patcher's MoltenVK is not governed by this file.)
+MVK_TAG=v1.4.2
+MVK_COMMIT=db66022459ffb663aa2b50f6b018bc2e124f5edf
+
+# The libraries the runtime bundles (GnuTLS with Nettle and GMP, and FreeType), built for the
+# runtime's oldest macOS by scripts/build-finewine-deps.sh from CrossOver's source archive,
+# which pins their versions in turn (GnuTLS 3.8.3; Nettle 3.10 comes from GNU, below).
+CROSSOVER_SOURCES_VERSION=26.3.0
+CROSSOVER_SOURCES_SHA256=ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872
+# Nettle's release archive from GNU: CrossOver's archive has Nettle's sources but not its top
+# Makefile.in. Same version; every source file the two share is identical (checked 2026-11-17).
+NETTLE_VERSION=3.10
+NETTLE_SHA256=b4c518adb174e484cb4acea54118f02380c7133771e7e9beb98a0787194ee47c
+
+# Build tools from Homebrew. Homebrew offers only its newest version of each, so these cannot
+# be pinned the way the sources are; the build checks the major version instead and stops on
+# a different one. llvm and lld compile Wine's Windows side, so a new major version of them
+# changes the code that is built and needs a test run before it is accepted here.
+BREW_LLVM_MAJOR=23
+BREW_LLD_MAJOR=23
+BREW_BISON_MAJOR=3
+
+# The Steam bridge (scripts/build-steam-bridge.sh): Valve's lsteamclient, from
+# github.com/ValveSoftware/Proton at this commit, with the files in
+# runtime-extras/steam-bridge/lsteamclient copied over it. The digest is of the extracted
+# lsteamclient folder (names and contents), because the archive's own bytes can change.
+STEAM_BRIDGE_PROTON_COMMIT=164e0ccd2ea2b1ec2e5d08dc97f65b184c2539ca
+STEAM_BRIDGE_LSTEAMCLIENT_DIGEST=b286df1df46a70d9e2cc674676afcc6e08b1a56ce472e5add0932b86940657bf
+# Headers the steam.exe helper is compiled against, each from its own Valve repository at the
+# commit Proton 9.0 uses (Proton's archive has those folders empty).
+STEAM_BRIDGE_OPENVR_COMMIT=f51d87ecf8f7903e859b0aa4d617ff1e5f33db5a
+STEAM_BRIDGE_OPENVR_H_SHA256=4f1242febb91d23e1a8317b988dbecec63476603f67458872d3b916cd347df32
+STEAM_BRIDGE_IVRCLIENTCORE_H_SHA256=07c8ce981a59fb7cd1dc30572f0c9972d98e6275e95527f0f7a74a18bc0cf846
+STEAM_BRIDGE_VALVE_WINE_COMMIT=015230dc0f78a543032dea0907f6c97304b25ca3
+STEAM_BRIDGE_WINE_HEAP_H_SHA256=e51df7c87744e3cbea4cd03d1e08573205252eb275166c0d01f87340991550e7

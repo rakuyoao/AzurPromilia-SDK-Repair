@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# build-app.sh — build "FineWine Patcher.app" (SwiftPM + manual bundle assembly; no Xcode needed,
+# only the Command Line Tools).
+#
+# The app bundles the pre-built patched Wine modules + MoltenVK as its payload, so completed
+# builds must exist first:  scripts/build-wine.sh all && scripts/build-moltenvk.sh all
+# (from the repo root)
+#
+# Usage:  patcher-app/scripts/build-app.sh
+# Env:
+#   PAYLOAD_DIR             where to find the built Wine modules
+#                           (default: <repo>/build/wine-build64, the build-wine.sh output tree;
+#                            a flat directory holding ntdll.so/kernel32.dll/ntoskrnl.exe also works)
+#   MOLTENVK_DIR            where to find the built libMoltenVK.dylib
+#                           (default: <repo>/build/moltenvk-out; a copy inside PAYLOAD_DIR also works)
+#   ARM_PAYLOAD_DIR         optional ARM (aarch64) payload built by scripts/build-wine-arm.sh
+#                           (default: <repo>/build/wine-arm-payload). Absent -> x64-only build;
+#                           the ARM payload is never required and never affects the x64 path.
+#   VERSION                 CFBundleShortVersionString baked into Info.plist (default: 1.1.0;
+#                           the release workflow sets this to the release branch version)
+#   CODESIGN_ID             signing identity (default "-" = ad-hoc; set your "Developer ID
+#                           Application: …" identity for notarizable builds)
+#   ALLOW_MISSING_PAYLOAD=1 build without payload (smoke-test builds only — the app will
+#                           refuse to patch, and says so in its UI)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")/.." && pwd)"          # patcher-app/
+REPO="$(cd "$HERE/.." && pwd)"
+APP_NAME="FineWine Patcher"
+EXE="FineWinePatcher"
+BUNDLE_ID="io.github.stoicswe.FineWinePatcher"
+VERSION="${VERSION:-1.1.0}"
+PAYLOAD_DIR="${PAYLOAD_DIR:-$REPO/build/wine-build64}"
+MOLTENVK_DIR="${MOLTENVK_DIR:-$REPO/build/moltenvk-out}"
+
+# Terminal dashboard (progress bars + live log tail). Must be sourced before any
+# real work so `zsh patcher-app/scripts/build-app.sh` can hand over to /bin/bash.
+UI_SELF="$0"
+. "$REPO/scripts/lib/build-ui.sh"
+ui_init "FineWine — FineWine Patcher ${VERSION}"
+
+ui_begin payload-fetch 5 "Checking for pre-built Wine modules"
+# Fall back to pre-packaged modules in dist/ if build directory does not exist
+if [ ! -d "$PAYLOAD_DIR" ] && [ -d "$REPO/dist/endfield-wine-modules" ]; then
+  PAYLOAD_DIR="$REPO/dist/endfield-wine-modules"
+fi
+
+# If neither exists and we're not explicitly allowing missing payload, try fetching the release tarball
+if [ ! -d "$PAYLOAD_DIR" ] && [ "${ALLOW_MISSING_PAYLOAD:-0}" != "1" ]; then
+  echo "Attempting to fetch pre-built modules from GitHub release..."
+  mkdir -p "$REPO/dist"
+  if command -v gh >/dev/null 2>&1 && gh release download --repo stoicswe/Endfield_FineWine -p "endfield-wine-modules.tar.gz" -D /tmp 2>/dev/null; then
+    tar -xzf /tmp/endfield-wine-modules.tar.gz -C "$REPO/dist"
+    PAYLOAD_DIR="$REPO/dist/endfield-wine-modules"
+  else
+    # curl fallback with a byte-accurate progress bar (Content-Length best effort)
+    url="https://github.com/stoicswe/Endfield_FineWine/releases/download/1.2.0/endfield-wine-modules.tar.gz"
+    mkdir -p "$HERE/build"
+    len=$(curl -sIL "$url" | grep -i '^content-length:' | tail -n 1 | tr -dc '0-9') || len=0
+    case "$len" in ''|*[!0-9]*) len=0 ;; esac
+    [ "$len" -gt 0 ] && { UI_PROBE_FILE="/tmp/endfield-wine-modules.tar.gz"; UI_PROBE_TOTAL="$len"; }
+    ui_run "$HERE/build/payload-download.log" "downloading endfield-wine-modules.tar.gz" \
+      curl -fsSL "$url" -o /tmp/endfield-wine-modules.tar.gz || true
+    UI_PROBE_FILE=""; UI_PROBE_TOTAL=0
+    if [ -s /tmp/endfield-wine-modules.tar.gz ]; then
+      tar -xzf /tmp/endfield-wine-modules.tar.gz -C "$REPO/dist"
+      PAYLOAD_DIR="$REPO/dist/endfield-wine-modules"
+    fi
+  fi
+fi
+ui_end
+
+CODESIGN_ID="${CODESIGN_ID:--}"
+OUT="$HERE/build"
+APP="$OUT/$APP_NAME.app"
+
+log(){ printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+ok(){  printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
+
+# ---------------------------------------------------------------- 1. compile
+ui_begin compile 40 "Compiling (swift build, release)"
+mkdir -p "$OUT"   # for build.log (swift build does not create OUT itself)
+ui_run "$HERE/build/build.log" "swift build -c release" \
+  swift build -c release --package-path "$HERE"
+BIN="$(swift build -c release --package-path "$HERE" --show-bin-path)/$EXE"
+[ -x "$BIN" ] || { echo "ERROR: build produced no executable at $BIN"; exit 1; }
+ok "$(file -b "$BIN")"
+ui_end
+
+# ---------------------------------------------------------------- 2. assemble bundle
+ui_begin bundle 12 "Assembling $APP_NAME.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/licenses" \
+         "$APP/Contents/Resources/payload/x86_64-unix" \
+         "$APP/Contents/Resources/payload/x86_64-windows" \
+         "$APP/Contents/Resources/payload/server" \
+         "$APP/Contents/Resources/payload/lib64"
+cp "$BIN" "$APP/Contents/MacOS/$EXE"
+# The real SDK in the binary, or macOS 26 and later draw the app without Liquid Glass.
+"$REPO/scripts/lib/stamp-sdk-version.sh" "$APP/Contents/MacOS/$EXE" 15.0
+cp "$HERE/Resources/licenses/"*.txt "$APP/Contents/Resources/licenses/"
+
+# Copy localization bundles
+for lproj in "$HERE/Sources/FineWinePatcher/Resources/"*.lproj; do
+  if [ -d "$lproj" ]; then
+    cp -R "$lproj" "$APP/Contents/Resources/"
+  fi
+done
+
+ICON_PLIST=""
+if [ -f "$HERE/Resources/AppIcon.icns" ]; then
+  cp "$HERE/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+  ICON_PLIST=$'\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>'
+  ok "app icon"
+else
+  warn "Resources/AppIcon.icns not found — building without an icon (run scripts/make-appicon.sh)"
+fi
+
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>$APP_NAME</string>
+	<key>CFBundleDisplayName</key>
+	<string>$APP_NAME</string>
+	<key>CFBundleExecutable</key>
+	<string>$EXE</string>
+$ICON_PLIST
+	<key>CFBundleIdentifier</key>
+	<string>$BUNDLE_ID</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$VERSION</string>
+	<key>CFBundleVersion</key>
+	<string>$VERSION</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>ja</string>
+		<string>ko</string>
+	</array>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+<string>GPL-3.0-or-later — © 2026 Endfield_FineWine contributors. Bundled Wine modules: LGPL-2.1-or-later.</string>
+</dict>
+</plist>
+PLIST
+plutil -lint -s "$APP/Contents/Info.plist"
+ok "bundle skeleton + Info.plist"
+ui_end
+
+# ---------------------------------------------------------------- 3. payload
+ui_begin payload 28 "Staging the pre-built Wine modules (payload) from $PAYLOAD_DIR and MoltenVK from $MOLTENVK_DIR"
+find_module(){ # flat-name  tree-relative-path
+  if   [ -f "$PAYLOAD_DIR/$2" ]; then echo "$PAYLOAD_DIR/$2"
+  elif [ -f "$PAYLOAD_DIR/$1" ]; then echo "$PAYLOAD_DIR/$1"
+  else echo ""; fi
+}
+NTDLL="$(find_module ntdll.so dlls/ntdll/ntdll.so)"
+WINEMAC="$(find_module winemac.so dlls/winemac.drv/winemac.so)"
+WINEMACPE="$(find_module winemac.drv dlls/winemac.drv/x86_64-windows/winemac.drv)"
+DWMAPI="$(find_module dwmapi.dll dlls/dwmapi/x86_64-windows/dwmapi.dll)"
+KERNEL32="$(find_module kernel32.dll dlls/kernel32/x86_64-windows/kernel32.dll)"
+NTOSKRNL="$(find_module ntoskrnl.exe dlls/ntoskrnl.exe/x86_64-windows/ntoskrnl.exe)"
+LSASS="$(find_module lsass.exe programs/lsass/x86_64-windows/lsass.exe)"
+WINEBOOT="$(find_module wineboot.exe programs/wineboot/x86_64-windows/wineboot.exe)"
+RUNDLL32="$(find_module rundll32.exe programs/rundll32/x86_64-windows/rundll32.exe)"
+WINESERVER="$(find_module wineserver server/wineserver)"
+# MoltenVK is built by build-moltenvk.sh into its own tree; also accept a copy beside the modules.
+if   [ -f "$PAYLOAD_DIR/libMoltenVK.dylib" ]; then MVK="$PAYLOAD_DIR/libMoltenVK.dylib"
+elif [ -f "$MOLTENVK_DIR/libMoltenVK.dylib" ]; then MVK="$MOLTENVK_DIR/libMoltenVK.dylib"
+else MVK=""; fi
+
+if [ -z "$NTDLL" ] || [ -z "$WINEMAC" ] || [ -z "$WINEMACPE" ] || [ -z "$DWMAPI" ] || [ -z "$KERNEL32" ] || [ -z "$NTOSKRNL" ] || [ -z "$LSASS" ] || [ -z "$WINEBOOT" ] || [ -z "$RUNDLL32" ] || [ -z "$WINESERVER" ] || [ -z "$MVK" ]; then
+  if [ "${ALLOW_MISSING_PAYLOAD:-0}" = "1" ]; then
+    warn "payload modules not found — building WITHOUT payload (smoke test only)"
+    ui_skip
+  else
+    echo "ERROR: payload modules not found under $PAYLOAD_DIR (Wine) / $MOLTENVK_DIR (MoltenVK)"
+    echo "       Run scripts/build-wine.sh all and scripts/build-moltenvk.sh all"
+    echo "       first (or set PAYLOAD_DIR / MOLTENVK_DIR)."
+    exit 1
+  fi
+else
+  P="$APP/Contents/Resources/payload"
+  cp "$NTDLL"    "$P/x86_64-unix/ntdll.so"
+  cp "$WINEMAC"  "$P/x86_64-unix/winemac.so"
+  cp "$WINEMACPE" "$P/x86_64-windows/winemac.drv"
+  cp "$DWMAPI"   "$P/x86_64-windows/dwmapi.dll"
+  cp "$KERNEL32" "$P/x86_64-windows/kernel32.dll"
+  cp "$NTOSKRNL" "$P/x86_64-windows/ntoskrnl.exe"
+  cp "$LSASS"    "$P/x86_64-windows/lsass.exe"
+  cp "$WINEBOOT" "$P/x86_64-windows/wineboot.exe"
+  cp "$RUNDLL32" "$P/x86_64-windows/rundll32.exe"
+  cp "$WINESERVER" "$P/server/wineserver"
+  cp "$MVK"      "$P/lib64/libMoltenVK.dylib"
+
+  # Pre-add the lib64 rpath to ntdll.so HERE, at app-build time, so end users of the
+  # patcher never need Xcode tools installed. CrossOver's ntdll dlopens cxcompatdb.so,
+  # which resolves @rpath/libgnutls through ntdll.so's own LC_RPATH — without this
+  # rpath D3DMetal never engages (see scripts/swap-into-crossover.sh).
+  NT="$P/x86_64-unix/ntdll.so"
+  if otool -l "$NT" >/dev/null 2>&1; then
+    if ! otool -l "$NT" | grep -A2 LC_RPATH | grep -q 'lib64'; then
+      install_name_tool -add_rpath "@loader_path/../../../lib64" "$NT"
+    fi
+    otool -l "$NT" | grep -A2 LC_RPATH | grep -q 'lib64' \
+      || { echo "ERROR: could not add the lib64 rpath to ntdll.so"; exit 1; }
+    ok "ntdll.so LC_RPATH → lib64 (required for D3DMetal)"
+  elif [ "${ALLOW_MISSING_PAYLOAD:-0}" = "1" ]; then
+    warn "ntdll.so is not a Mach-O (dummy payload?) — skipping the rpath step"
+  else
+    echo "ERROR: $NTDLL is not a Mach-O binary"; exit 1
+  fi
+
+  # winemac.so needs the same rpath: stock carries it, our build does not.
+  WM="$P/x86_64-unix/winemac.so"
+  if otool -l "$WM" >/dev/null 2>&1; then
+    if ! otool -l "$WM" | grep -A2 LC_RPATH | grep -q 'lib64'; then
+      install_name_tool -add_rpath "@loader_path/../../../lib64" "$WM"
+    fi
+    otool -l "$WM" | grep -A2 LC_RPATH | grep -q 'lib64' \
+      || { echo "ERROR: could not add the lib64 rpath to winemac.so"; exit 1; }
+    ok "winemac.so LC_RPATH → lib64"
+  elif [ "${ALLOW_MISSING_PAYLOAD:-0}" = "1" ]; then
+    warn "winemac.so is not a Mach-O (dummy payload?) — skipping the rpath step"
+  else
+    echo "ERROR: $WINEMAC is not a Mach-O binary"; exit 1
+  fi
+
+  # CrossOver's bundled copy is loaded via @rpath/libMoltenVK.dylib; give ours the same install
+  # name so win32u's dlopen resolves it exactly as before.
+  install_name_tool -id "@rpath/libMoltenVK.dylib" "$P/lib64/libMoltenVK.dylib"
+
+  for f in "$P/x86_64-unix/ntdll.so" "$P/x86_64-unix/winemac.so" "$P/x86_64-windows/kernel32.dll" \
+           "$P/x86_64-windows/ntoskrnl.exe" "$P/x86_64-windows/lsass.exe" \
+           "$P/x86_64-windows/wineboot.exe" "$P/server/wineserver" "$P/lib64/libMoltenVK.dylib"; do
+    codesign --force --sign "$CODESIGN_ID" "$f" 2>/dev/null || true
+  done
+  ok "payload staged: ntdll.so, winemac.so, dwmapi.dll, kernel32.dll, ntoskrnl.exe, lsass.exe, wineboot.exe, wineserver, libMoltenVK.dylib"
+  ui_end
+fi
+
+# ---------------------------------------------------------------- 3b. ARM payload (experimental)
+# The ARM (aarch64, no-Rosetta) payload is built by a SEPARATE pipeline
+# (scripts/build-wine-arm.sh) so the x64 path stays untouched, and staged into payload/arm/.
+# It is optional: with no ARM payload the app still builds and patches x64 exactly as before,
+# and simply reports that the ARM payload is missing when an ARM CrossOver is selected.
+ARM_PAYLOAD_DIR="${ARM_PAYLOAD_DIR:-$REPO/build/wine-arm-payload}"
+if [ -d "$ARM_PAYLOAD_DIR" ]; then
+  P_ARM="$APP/Contents/Resources/payload/arm"
+  mkdir -p "$P_ARM"
+  # ditto to preserve any symlinks/permissions in the payload tree.
+  ditto "$ARM_PAYLOAD_DIR/" "$P_ARM/"
+  ok "ARM payload staged from $ARM_PAYLOAD_DIR ($(find "$P_ARM" -type f | wc -l | tr -d ' ') files)"
+else
+  warn "no ARM payload at $ARM_PAYLOAD_DIR — building x64-only (build it with scripts/build-wine-arm.sh)"
+fi
+
+# ---------------------------------------------------------------- 4. sign
+ui_begin sign 15 "Signing ($CODESIGN_ID)"
+if [ "$CODESIGN_ID" = "-" ]; then
+  codesign --force --sign - "$APP"
+else
+  codesign --force --options runtime --timestamp --sign "$CODESIGN_ID" "$APP"
+fi
+codesign --verify "$APP"
+ok "signature verifies"
+ui_end
+
+# ---------------------------------------------------------------- 5. done
+log "Done -> $APP"
+cat <<EOF
+
+Next:
+  open "$APP"
+
+Notes:
+  - Ad-hoc-signed builds are for your own machine. To distribute, re-run with
+    CODESIGN_ID="Developer ID Application: …" and notarize, or tell users to
+    right-click -> Open on first launch.
+  - If you distribute the built app, the bundled Wine modules are LGPL-2.1-or-later and
+    libMoltenVK.dylib is Apache-2.0: publish the patches + exact CrossOver source used
+    (see patcher-app/README.md).
+EOF
+ui_finish
